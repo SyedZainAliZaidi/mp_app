@@ -1,208 +1,313 @@
 import os
-
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from supabase import Client, create_client
-
-
-# ============================================================
-# Load environment variables
-# ============================================================
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from supabase import create_client
 
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
+supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
-# ============================================================
-# Check Supabase configuration
-# ============================================================
+app = FastAPI(title="M&P Service Assistant")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError(
-        "SUPABASE_URL and SUPABASE_KEY must be set in .env"
-    )
-
-
-# ============================================================
-# Create Supabase client
-# ============================================================
-
-supabase: Client = create_client(
-    SUPABASE_URL,
-    SUPABASE_KEY
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
-# ============================================================
-# FastAPI application
-# ============================================================
+class ServiceRequestCreate(BaseModel):
+    user_id: str
+    device_brand: str
+    device_model: str | None = None
+    issue_type: str
+    warranty_status: str = "unknown"
+    description: str | None = None
 
-app = FastAPI(
-    title="Profile API",
-    description="FastAPI + Supabase Profile API",
-    version="1.0.0"
-)
-
-
-# ============================================================
-# Root / Server Health Check
-# ============================================================
 
 @app.get("/")
-def root():
+def health():
+    return {"status": "M&P service assistant backend running"}
+
+
+@app.post("/service-requests")
+def create_service_request(req: ServiceRequestCreate):
+    result = supabase.table("service_requests").insert({
+        "user_id": req.user_id,
+        "device_brand": req.device_brand,
+        "device_model": req.device_model,
+        "issue_type": req.issue_type,
+        "warranty_status": req.warranty_status,
+        "description": req.description,
+        "status": "submitted",
+    }).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=400, detail="Could not create service request")
+
+    request_id = result.data[0]["id"]
+
+    supabase.table("request_status_history").insert({
+        "request_id": request_id,
+        "status": "submitted",
+        "note": "Request received from customer",
+    }).execute()
+
+    return result.data[0]
+
+
+@app.get("/service-requests/{request_id}")
+def get_service_request(request_id: str):
+    result = supabase.table("service_requests").select("*").eq("id", request_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return result.data[0]
+
+
+@app.get("/service-centers")
+def list_service_centers():
+    result = supabase.table("service_centers").select("*").eq("is_active", True).execute()
+    return result.data
+
+
+from groq import Groq
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+groq_client = Groq(api_key=GROQ_API_KEY)
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
+
+class DescribeProblemRequest(BaseModel):
+    user_id: str
+    message: str
+
+
+def ask_groq_json(prompt):
+    response = groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        timeout=30
+    )
+    return response.choices[0].message.content
+
+
+@app.post("/describe-problem")
+def describe_problem(req: DescribeProblemRequest):
+    prompt = (
+        f"A customer contacted M&P device service support and described their problem in their own words.\n\n"
+        f"Their message: \"{req.message}\"\n\n"
+        f"Read this and extract structured information. Respond ONLY with valid JSON, no other text, "
+        f"in exactly this shape:\n"
+        f'{{"device_brand": "guess the brand or unknown", "device_model": "guess the model or null", '
+        f'"issue_type": "one of screen_replacement, battery, software, physical_damage, warranty_claim, other", '
+        f'"warranty_status": "one of warranty, non_warranty, unknown", '
+        f'"summary": "a short one sentence clean summary of the issue"}}'
+    )
+
+    raw = ask_groq_json(prompt)
+
+    import json
+    try:
+        extracted = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not understand the problem, please try rephrasing")
+
+    result = supabase.table("service_requests").insert({
+        "user_id": req.user_id,
+        "device_brand": extracted.get("device_brand", "unknown"),
+        "device_model": extracted.get("device_model"),
+        "issue_type": extracted.get("issue_type", "other"),
+        "warranty_status": extracted.get("warranty_status", "unknown"),
+        "description": extracted.get("summary", req.message),
+        "status": "submitted",
+    }).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=400, detail="Could not create service request")
+
+    request_id = result.data[0]["id"]
+
+    supabase.table("request_status_history").insert({
+        "request_id": request_id,
+        "status": "submitted",
+        "note": "Request received and understood from customer's own description",
+    }).execute()
+
+    return result.data[0]
+
+
+from fastapi import UploadFile, File, Form
+import uuid as uuid_lib
+
+BUCKET_NAME = "attachments"
+
+
+@app.post("/service-requests/{request_id}/attachments")
+def upload_attachment(request_id: str, file_type: str = Form(...), file: UploadFile = File(...)):
+    file_bytes = file.file.read()
+    file_extension = file.filename.split(".")[-1] if "." in file.filename else "bin"
+    storage_path = f"{request_id}/{uuid_lib.uuid4()}.{file_extension}"
+
+    supabase.storage.from_(BUCKET_NAME).upload(
+        storage_path,
+        file_bytes,
+        {"content-type": file.content_type}
+    )
+
+    signed_url = supabase.storage.from_(BUCKET_NAME).create_signed_url(storage_path, 60 * 60 * 24 * 7)
+
+    result = supabase.table("request_attachments").insert({
+        "request_id": request_id,
+        "file_url": storage_path,
+        "file_type": file_type,
+    }).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=400, detail="Could not save attachment record")
+
     return {
-        "success": True,
-        "message": "Server is running"
+        "attachment": result.data[0],
+        "temporary_view_url": signed_url.get("signedURL")
     }
 
 
-# ============================================================
-# Test Supabase Connection
-# ============================================================
+@app.get("/service-requests/{request_id}/attachments")
+def list_attachments(request_id: str):
+    result = supabase.table("request_attachments").select("*").eq("request_id", request_id).execute()
 
-@app.get("/test-connection")
-def test_connection():
-    """
-    Tests the connection between FastAPI and Supabase.
+    attachments = []
+    for row in result.data:
+        signed = supabase.storage.from_(BUCKET_NAME).create_signed_url(row["file_url"], 60 * 60)
+        attachments.append({**row, "temporary_view_url": signed.get("signedURL")})
 
-    No Bearer token required.
-    """
-
-    try:
-        response = (
-            supabase
-            .table("profiles")
-            .select("id")
-            .limit(1)
-            .execute()
-        )
-
-        return {
-            "success": True,
-            "message": "Supabase connection successful",
-            "data": response.data
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Supabase connection failed: {str(e)}"
-        )
+    return attachments
 
 
-# ============================================================
-# Get All Profiles
-# ============================================================
-
-@app.get("/profiles")
-def get_profiles():
-    """
-    Get all profiles from the profiles table.
-
-    No Bearer token required.
-    """
-
-    try:
-        response = (
-            supabase
-            .table("profiles")
-            .select("*")
-            .execute()
-        )
-
-        return {
-            "success": True,
-            "profiles": response.data
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch profiles: {str(e)}"
-        )
+class CourierBookingCreate(BaseModel):
+    request_id: str
+    pickup_address: str
+    courier_provider: str = "TBD"
 
 
-# ============================================================
-# Get Single Profile
-# ============================================================
-
-@app.get("/profile/{profile_id}")
-def get_profile(profile_id: str):
-    """
-    Get one profile by ID.
-
-    No Bearer token required.
-    """
-
-    try:
-        response = (
-            supabase
-            .table("profiles")
-            .select("*")
-            .eq("id", profile_id)
-            .execute()
-        )
-
-        if not response.data:
-            raise HTTPException(
-                status_code=404,
-                detail="Profile not found"
-            )
-
-        return {
-            "success": True,
-            "profile": response.data[0]
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch profile: {str(e)}"
-        )
+class StatusUpdate(BaseModel):
+    status: str
+    note: str | None = None
 
 
-# ============================================================
-# Get Profile by Phone
-# ============================================================
+@app.post("/courier-bookings")
+def create_courier_booking(req: CourierBookingCreate):
+    result = supabase.table("courier_bookings").insert({
+        "request_id": req.request_id,
+        "pickup_address": req.pickup_address,
+        "courier_provider": req.courier_provider,
+        "status": "pending",
+    }).execute()
 
-@app.get("/profile/phone/{phone}")
-def get_profile_by_phone(phone: str):
-    """
-    Get profile using phone number.
+    if not result.data:
+        raise HTTPException(status_code=400, detail="Could not create courier booking")
 
-    No Bearer token required.
-    """
+    supabase.table("service_requests").update({"status": "courier_booked"}).eq("id", req.request_id).execute()
 
-    try:
-        response = (
-            supabase
-            .table("profiles")
-            .select("*")
-            .eq("phone", phone)
-            .execute()
-        )
+    supabase.table("request_status_history").insert({
+        "request_id": req.request_id,
+        "status": "courier_booked",
+        "note": f"Courier pickup scheduled from {req.pickup_address}",
+    }).execute()
 
-        if not response.data:
-            raise HTTPException(
-                status_code=404,
-                detail="Profile not found"
-            )
+    return result.data[0]
 
-        return {
-            "success": True,
-            "profile": response.data[0]
-        }
 
-    except HTTPException:
-        raise
+@app.patch("/service-requests/{request_id}/status")
+def update_status(request_id: str, update: StatusUpdate):
+    result = supabase.table("service_requests").update(
+        {"status": update.status}
+    ).eq("id", request_id).execute()
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch profile: {str(e)}"
-        )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Request not found")
+    print('zain')
+    supabase.table("request_status_history").insert({
+        "request_id": request_id,
+        "status": update.status,
+        "note": update.note,
+    }).execute()
+
+    return result.data[0]
+
+
+@app.get("/service-requests/{request_id}/timeline")
+def get_timeline(request_id: str):
+    result = supabase.table("request_status_history").select("*").eq(
+        "request_id", request_id
+    ).order("created_at").execute()
+    return result.data
+
+
+class CourierBookingCreate(BaseModel):
+    request_id: str
+    pickup_address: str
+    courier_provider: str | None = None
+
+
+class StatusUpdate(BaseModel):
+    status: str
+    note: str | None = None
+
+
+@app.post("/courier-bookings")
+def create_courier_booking(req: CourierBookingCreate):
+    result = supabase.table("courier_bookings").insert({
+        "request_id": req.request_id,
+        "pickup_address": req.pickup_address,
+        "courier_provider": req.courier_provider,
+        "status": "pending",
+    }).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=400, detail="Could not book courier")
+
+    supabase.table("service_requests").update({"status": "courier_booked"}).eq("id", req.request_id).execute()
+
+    supabase.table("request_status_history").insert({
+        "request_id": req.request_id,
+        "status": "courier_booked",
+        "note": "Pickup scheduled",
+    }).execute()
+
+    return result.data[0]
+
+
+@app.patch("/service-requests/{request_id}/status")
+def update_request_status(request_id: str, update: StatusUpdate):
+    result = supabase.table("service_requests").update({
+        "status": update.status
+    }).eq("id", request_id).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    supabase.table("request_status_history").insert({
+        "request_id": request_id,
+        "status": update.status,
+        "note": update.note,
+    }).execute()
+
+    return result.data[0]
+
+
+@app.get("/service-requests/{request_id}/timeline")
+def get_timeline(request_id: str):
+    result = supabase.table("request_status_history").select("*").eq("request_id", request_id).order("created_at").execute()
+    return result.data
+
+
+@app.get("/name-requests/[request_id]")
+def get_service_request(request_id):
+    result.data
