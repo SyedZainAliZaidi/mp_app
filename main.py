@@ -20,7 +20,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = "openai/gpt-oss-120b"
 BUCKET_NAME = "attachments"
 
 app = FastAPI(title="M&P Service Assistant")
