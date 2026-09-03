@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Service Request Detail</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+
+<div class="max-w-5xl mx-auto py-8 px-6">
+
+  <a href="dashboard.html" class="text-sm text-blue-600 font-medium mb-6 inline-block">&larr; Back to dashboard</a>
+
+  <div id="loadingState" class="text-slate-400 text-sm">Loading request...</div>
+
+  <div id="content" class="hidden">
+
+    <div class="flex items-start justify-between mb-6">
+      <div>
+        <h1 class="text-xl font-semibold" id="deviceTitle">—</h1>
+        <p class="text-slate-500 text-sm mt-1" id="requestSummary">—</p>
+      </div>
+      <div id="currentStatusBadge"></div>
+    </div>
+
+    <div class="grid grid-cols-3 gap-6">
+
+      <div class="col-span-2 space-y-6">
+
+        <div class="bg-white rounded-2xl border border-slate-200 p-5">
+          <p class="text-sm font-medium mb-4">Take action</p>
+
+          <label class="block text-xs font-medium text-slate-500 mb-1.5">Update status</label>
+          <div class="flex gap-2 mb-4">
+            <select id="statusSelect" class="flex-1 border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-600">
+              <option value="submitted">Submitted</option>
+              <option value="courier_booked">Courier Booked</option>
+              <option value="at_service_center">At Service Center</option>
+              <option value="in_repair">In Repair</option>
+              <option value="ready_for_pickup">Ready for Pickup</option>
+              <option value="delivered">Delivered</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+            <button onclick="updateStatus()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 rounded-xl">Update</button>
+          </div>
+          <input id="statusNote" type="text" placeholder="Optional note for this update" class="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-600 mb-5">
+
+          <label class="block text-xs font-medium text-slate-500 mb-1.5">Assign service center</label>
+          <div class="flex gap-2">
+            <select id="serviceCenterSelect" class="flex-1 border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-600"></select>
+            <button onclick="assignServiceCenter()" class="bg-slate-800 hover:bg-slate-900 text-white text-sm font-medium px-4 rounded-xl">Assign</button>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl border border-slate-200 p-5" id="courierSection">
+          <p class="text-sm font-medium mb-4">Courier pickup</p>
+          <div id="courierExisting" class="hidden text-sm text-slate-600"></div>
+          <div id="courierForm">
+            <input id="pickupAddress" type="text" placeholder="Pickup address" class="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-600 mb-3">
+            <div class="flex gap-2">
+              <input id="courierProvider" type="text" placeholder="Courier provider (e.g. TCS)" class="flex-1 border border-slate-300 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-600">
+              <button onclick="bookCourier()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 rounded-xl">Book pickup</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl border border-slate-200 p-5">
+          <p class="text-sm font-medium mb-4">Attachments</p>
+          <div id="attachmentsList" class="text-sm text-slate-500">No attachments.</div>
+        </div>
+
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 p-5 h-fit">
+        <p class="text-sm font-medium mb-4">Timeline</p>
+        <div id="timeline" class="space-y-4"></div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<script>
+const SUPABASE_URL = "https://zjwsqnkbmcdxanzgtnzt.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_lESyv6I0uBGflK1zmtnuNQ_nuPk6FBz";
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const params = new URLSearchParams(window.location.search);
+const requestId = params.get('id');
+
+if (!requestId) {
+  document.getElementById('loadingState').textContent = 'No request id given. Go back to the dashboard and click a request.';
+}
+
+const statusLabels = {
+  submitted: 'Submitted',
+  courier_booked: 'Courier Booked',
+  at_service_center: 'At Service Center',
+  in_repair: 'In Repair',
+  ready_for_pickup: 'Ready for Pickup',
+  delivered: 'Delivered',
+  cancelled: 'Cancelled',
+};
+
+async function checkSession() {
+  const { data: { session } } = await supabaseClient.auth.getSession();
+  if (!session) window.location.href = 'login.html';
+}
+
+async function loadServiceCenters() {
+  const { data } = await supabaseClient.from('service_centers').select('*').eq('is_active', true);
+  const select = document.getElementById('serviceCenterSelect');
+  select.innerHTML = (data || []).map(c => `<option value="${c.id}">${c.name} — ${c.city}</option>`).join('') || '<option>No service centers added yet</option>';
+}
+
+async function loadRequest() {
+  const { data: req, error } = await supabaseClient.from('service_requests').select('*').eq('id', requestId).single();
+
+  if (error || !req) {
+    document.getElementById('loadingState').textContent = 'Could not load this request.';
+    return;
+  }
+
+  document.getElementById('deviceTitle').textContent = `${req.device_brand || 'Unknown device'} ${req.device_model || ''}`;
+  document.getElementById('requestSummary').textContent = req.description || 'No description provided.';
+  document.getElementById('currentStatusBadge').innerHTML = `<span class="px-3 py-1.5 rounded-full text-sm font-medium bg-blue-50 text-blue-700">${statusLabels[req.status] || req.status}</span>`;
+  document.getElementById('statusSelect').value = req.status;
+  if (req.service_center_id) document.getElementById('serviceCenterSelect').value = req.service_center_id;
+
+  const { data: booking } = await supabaseClient.from('courier_bookings').select('*').eq('request_id', requestId).maybeSingle();
+  if (booking) {
+    document.getElementById('courierForm').classList.add('hidden');
+    const existing = document.getElementById('courierExisting');
+    existing.classList.remove('hidden');
+    existing.innerHTML = `Pickup already booked with <strong>${booking.courier_provider || 'a courier'}</strong> from ${booking.pickup_address}. Status: ${booking.status}.`;
+  }
+
+  const { data: attachments } = await supabaseClient.from('request_attachments').select('*').eq('request_id', requestId);
+  const list = document.getElementById('attachmentsList');
+  if (attachments && attachments.length > 0) {
+    list.innerHTML = attachments.map(a => `<div class="flex items-center justify-between py-1.5 text-slate-600"><span>${a.file_type}</span><span class="text-slate-400">${new Date(a.uploaded_at).toLocaleString()}</span></div>`).join('');
+  }
+
+  const { data: history } = await supabaseClient.from('request_status_history').select('*').eq('request_id', requestId).order('created_at', { ascending: false });
+  const timeline = document.getElementById('timeline');
+  timeline.innerHTML = (history || []).map(h => `
+    <div class="border-l-2 border-blue-200 pl-3">
+      <p class="text-sm font-medium">${statusLabels[h.status] || h.status}</p>
+      ${h.note ? `<p class="text-xs text-slate-500">${h.note}</p>` : ''}
+      <p class="text-xs text-slate-400 mt-0.5">${new Date(h.created_at).toLocaleString()}</p>
+    </div>
+  `).join('') || '<p class="text-sm text-slate-400">No history yet.</p>';
+
+  document.getElementById('loadingState').classList.add('hidden');
+  document.getElementById('content').classList.remove('hidden');
+}
+
+async function updateStatus() {
+  const status = document.getElementById('statusSelect').value;
+  const note = document.getElementById('statusNote').value.trim();
+
+  await supabaseClient.from('service_requests').update({ status }).eq('id', requestId);
+  await supabaseClient.from('request_status_history').insert({ request_id: requestId, status, note: note || null });
+
+  document.getElementById('statusNote').value = '';
+  loadRequest();
+}
+
+async function assignServiceCenter() {
+  const centerId = document.getElementById('serviceCenterSelect').value;
+  await supabaseClient.from('service_requests').update({ service_center_id: centerId }).eq('id', requestId);
+  loadRequest();
+}
+
+async function bookCourier() {
+  const pickup_address = document.getElementById('pickupAddress').value.trim();
+  const courier_provider = document.getElementById('courierProvider').value.trim();
+
+  if (!pickup_address) return;
+
+  await supabaseClient.from('courier_bookings').insert({
+    request_id: requestId,
+    pickup_address,
+    courier_provider: courier_provider || null,
+    status: 'pending',
+  });
+
+  await supabaseClient.from('service_requests').update({ status: 'courier_booked' }).eq('id', requestId);
+  await supabaseClient.from('request_status_history').insert({ request_id: requestId, status: 'courier_booked', note: 'Pickup scheduled' });
+
+  loadRequest();
+}
+
+checkSession();
+if (requestId) loadRequest();
+loadServiceCenters();
+</script>
+
+</body>
+</html>

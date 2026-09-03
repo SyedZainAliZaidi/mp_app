@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>M&P Support</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  body { font-family: 'Inter', -apple-system, sans-serif; }
+</style>
+</head>
+<body class="bg-white text-slate-900">
+
+<div class="flex min-h-screen">
+
+  <div class="hidden lg:flex lg:w-3/5 flex-col bg-slate-50 px-16 py-10 border-r border-slate-200">
+    <div class="flex items-center justify-between mb-14">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-semibold text-sm">M</div>
+        <span class="font-semibold text-lg">M&amp;P<span class="text-blue-600">Support</span></span>
+      </div>
+      <div class="flex items-center gap-2 text-sm text-slate-500">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>
+        Active Systems Operational · Uptime 99.99%
+      </div>
+    </div>
+
+    <p class="text-xs font-medium text-blue-600 mb-2">LIVE DASHBOARD PREVIEW</p>
+    <h1 class="text-3xl font-semibold mb-3 max-w-md leading-snug">Your command center for warranty and repair operations</h1>
+    <p class="text-slate-500 mb-10 max-w-md">Track every service request, courier pickup, and repair timeline from one place.</p>
+
+    <div class="grid grid-cols-4 gap-4 mb-8">
+      <div class="bg-white rounded-2xl border border-slate-200 p-4">
+        <p class="text-xs text-slate-500 mb-1">Open Requests</p>
+        <p class="text-2xl font-semibold" id="kpi-open">—</p>
+      </div>
+      <div class="bg-white rounded-2xl border border-slate-200 p-4">
+        <p class="text-xs text-slate-500 mb-1">In Repair</p>
+        <p class="text-2xl font-semibold" id="kpi-repair">—</p>
+      </div>
+      <div class="bg-white rounded-2xl border border-slate-200 p-4">
+        <p class="text-xs text-slate-500 mb-1">Delivered</p>
+        <p class="text-2xl font-semibold" id="kpi-delivered">—</p>
+      </div>
+      <div class="bg-blue-600 rounded-2xl p-4 text-white flex flex-col justify-between">
+        <p class="text-xs opacity-80 mb-1">M&amp;P Premium Care</p>
+        <p class="text-sm font-medium">Priority routing for VIP accounts</p>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-2xl border border-slate-200 p-5">
+      <div class="flex items-center justify-between mb-4">
+        <p class="text-sm font-medium">Request status overview</p>
+      </div>
+      <canvas id="previewChart" height="90"></canvas>
+    </div>
+  </div>
+
+  <div class="flex-1 flex items-center justify-center px-8 py-10">
+    <div class="w-full max-w-sm">
+      <div class="flex items-center gap-2 mb-10 lg:hidden">
+        <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-semibold text-sm">M</div>
+        <span class="font-semibold text-lg">M&amp;P<span class="text-blue-600">Support</span></span>
+      </div>
+
+      <h2 class="text-2xl font-semibold mb-1">Welcome back</h2>
+      <p class="text-slate-500 mb-8">Sign in to manage service requests and support conversations.</p>
+
+      <div id="errorBox" class="hidden bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl px-4 py-3 mb-5"></div>
+
+      <label class="block text-sm font-medium mb-1.5">Email address</label>
+      <input id="email" type="email" placeholder="name@mp.com.pk" class="w-full border border-slate-300 rounded-xl px-4 py-2.5 mb-4 outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600">
+
+      <label class="block text-sm font-medium mb-1.5">Password</label>
+      <input id="password" type="password" placeholder="••••••••••" class="w-full border border-slate-300 rounded-xl px-4 py-2.5 mb-2 outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600">
+
+      <div class="flex items-center justify-between mb-6 mt-3 text-sm">
+        <label class="flex items-center gap-2 text-slate-600">
+          <input type="checkbox" checked class="rounded border-slate-300 text-blue-600">
+          Remember me
+        </label>
+        <a href="#" class="text-blue-600 font-medium">Forgot password?</a>
+      </div>
+
+      <button id="signInBtn" onclick="signIn()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl py-2.5 mb-5 transition">Sign in to your Portal</button>
+
+      <div class="flex items-center gap-3 mb-5">
+        <div class="h-px bg-slate-200 flex-1"></div>
+        <span class="text-xs text-slate-400">or continue with</span>
+        <div class="h-px bg-slate-200 flex-1"></div>
+      </div>
+
+      <button onclick="signInWithGoogle()" class="w-full border border-slate-300 rounded-xl py-2.5 flex items-center justify-center gap-2 hover:bg-slate-50 transition font-medium text-sm">
+        <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.71v2.26h2.9c1.7-1.57 2.7-3.88 2.7-6.61z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.19l-2.9-2.26c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.71H.98v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.95 10.7A5.4 5.4 0 0 1 3.67 9c0-.59.1-1.17.28-1.7V4.97H.98A9 9 0 0 0 0 9c0 1.45.35 2.83.98 4.03l2.97-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .98 4.97l2.97 2.33C4.66 5.17 6.65 3.58 9 3.58z"/></svg>
+        Google
+      </button>
+
+      <p class="text-center text-sm text-slate-500 mt-8">Don't have an account? <a href="#" class="text-blue-600 font-medium">Sign up</a></p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const SUPABASE_URL = "https://zjwsqnkbmcdxanzgtnzt.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_lESyv6I0uBGflK1zmtnuNQ_nuPk6FBz";
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const API = "https://mp-app-mu.vercel.app";
+
+function showError(message) {
+  const box = document.getElementById('errorBox');
+  box.textContent = message;
+  box.classList.remove('hidden');
+}
+
+async function signIn() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+
+  const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+
+  if (error) {
+    showError(error.message);
+    return;
+  }
+
+  localStorage.setItem('mp_staff_session', JSON.stringify(data.session));
+  window.location.href = 'dashboard.html';
+}
+
+async function signInWithGoogle() {
+  const { error } = await supabaseClient.auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo: window.location.origin + '/dashboard.html' }
+  });
+  if (error) showError(error.message);
+}
+
+async function loadPreviewStats() {
+  try {
+    const res = await fetch(`${API}/profiles`);
+    const data = await res.json();
+
+    document.getElementById('kpi-open').textContent = '—';
+    document.getElementById('kpi-repair').textContent = '—';
+    document.getElementById('kpi-delivered').textContent = '—';
+
+    new Chart(document.getElementById('previewChart'), {
+      type: 'line',
+      data: {
+        labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+        datasets: [{
+          label: 'Requests',
+          data: [4, 7, 5, 9, 6, 8, 10],
+          borderColor: '#2563eb',
+          backgroundColor: 'rgba(37,99,235,0.08)',
+          fill: true,
+          tension: 0.35
+        }]
+      },
+      options: {
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  } catch (e) {}
+}
+
+loadPreviewStats();
+</script>
+
+</body>
+</html>
