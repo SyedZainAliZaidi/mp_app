@@ -2,29 +2,30 @@ import json
 import os
 import uuid as uuid_lib
 
+import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 from pydantic import BaseModel
-from supabase import create_client
 
 load_dotenv()
 
-# Environment Variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Clients
-def get_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
-
 
 genai.configure(api_key=GEMINI_API_KEY)
 
 GEMINI_MODEL = "gemini-3.6-flash"
 BUCKET_NAME = "attachments"
+
+REST_HEADERS = {
+    "apikey": SUPABASE_SECRET_KEY,
+    "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+}
 
 app = FastAPI(title="M&P Service Assistant")
 
@@ -36,7 +37,6 @@ app.add_middleware(
 )
 
 
-# Pydantic Schemas
 class ServiceRequestCreate(BaseModel):
     user_id: str
     device_brand: str
@@ -62,7 +62,33 @@ class StatusUpdate(BaseModel):
     note: str | None = None
 
 
-# Helpers
+def db_insert(table: str, payload: dict) -> list:
+    res = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=REST_HEADERS, json=payload, timeout=15)
+    if res.status_code not in (200, 201):
+        raise Exception(f"{res.status_code}: {res.text}")
+    return res.json()
+
+
+def db_select(table: str, filters: str = "", order: str = "") -> list:
+    url = f"{SUPABASE_URL}/rest/v1/{table}?select=*"
+    if filters:
+        url += f"&{filters}"
+    if order:
+        url += f"&order={order}"
+    res = requests.get(url, headers=REST_HEADERS, timeout=15)
+    if res.status_code != 200:
+        raise Exception(f"{res.status_code}: {res.text}")
+    return res.json()
+
+
+def db_update(table: str, filters: str, payload: dict) -> list:
+    url = f"{SUPABASE_URL}/rest/v1/{table}?{filters}"
+    res = requests.patch(url, headers=REST_HEADERS, json=payload, timeout=15)
+    if res.status_code not in (200, 201, 204):
+        raise Exception(f"{res.status_code}: {res.text}")
+    return res.json() if res.text else []
+
+
 def ask_gemini_json(prompt: str) -> str:
     model = genai.GenerativeModel(
         GEMINI_MODEL,
@@ -72,13 +98,6 @@ def ask_gemini_json(prompt: str) -> str:
     return response.text
 
 
-def extract_signed_url(signed_res: dict | object) -> str | None:
-    if isinstance(signed_res, dict):
-        return signed_res.get("signedURL") or signed_res.get("signedUrl")
-    return getattr(signed_res, "signed_url", None)
-
-
-# Routes
 @app.get("/")
 def health():
     return {"status": "M&P service assistant backend running"}
@@ -87,32 +106,30 @@ def health():
 @app.post("/service-requests")
 def create_service_request(req: ServiceRequestCreate):
     try:
-        result = (
-            get_supabase().table("service_requests")
-            .insert({
-                "user_id": req.user_id,
-                "device_brand": req.device_brand,
-                "device_model": req.device_model,
-                "issue_type": req.issue_type,
-                "warranty_status": req.warranty_status,
-                "description": req.description,
-                "status": "submitted",
-            })
-            .execute()
-        )
+        result = db_insert("service_requests", {
+            "user_id": req.user_id,
+            "device_brand": req.device_brand,
+            "device_model": req.device_model,
+            "issue_type": req.issue_type,
+            "warranty_status": req.warranty_status,
+            "description": req.description,
+            "status": "submitted",
+        })
 
-        if not result.data:
+        if not result:
             raise HTTPException(status_code=400, detail="Could not create service request")
 
-        request_id = result.data[0]["id"]
+        request_id = result[0]["id"]
 
-        get_supabase().table("request_status_history").insert({
+        db_insert("request_status_history", {
             "request_id": request_id,
             "status": "submitted",
             "note": "Request received from customer",
-        }).execute()
+        })
 
-        return result.data[0]
+        return result[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
@@ -120,10 +137,12 @@ def create_service_request(req: ServiceRequestCreate):
 @app.get("/service-requests/{request_id}")
 def get_service_request(request_id: str):
     try:
-        result = get_supabase().table("service_requests").select("*").eq("id", request_id).execute()
-        if not result.data:
+        result = db_select("service_requests", filters=f"id=eq.{request_id}")
+        if not result:
             raise HTTPException(status_code=404, detail="Request not found")
-        return result.data[0]
+        return result[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
@@ -131,15 +150,13 @@ def get_service_request(request_id: str):
 @app.get("/service-centers")
 def list_service_centers():
     try:
-        result = get_supabase().table("service_centers").select("*").eq("is_active", True).execute()
-        return result.data
+        return db_select("service_centers", filters="is_active=eq.true")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
 
 @app.post("/describe-problem")
 def describe_problem(req: DescribeProblemRequest):
-    # Step 1: Call Gemini API
     try:
         prompt = (
             f"A customer contacted M&P device service support and described their problem in their own words.\n\n"
@@ -156,34 +173,31 @@ def describe_problem(req: DescribeProblemRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gemini API Error: {str(e)}")
 
-    # Step 2: Insert into Supabase
     try:
-        result = (
-            get_supabase().table("service_requests")
-            .insert({
-                "user_id": req.user_id,
-                "device_brand": extracted.get("device_brand", "unknown"),
-                "device_model": extracted.get("device_model"),
-                "issue_type": extracted.get("issue_type", "other"),
-                "warranty_status": extracted.get("warranty_status", "unknown"),
-                "description": extracted.get("summary", req.message),
-                "status": "submitted",
-            })
-            .execute()
-        )
+        result = db_insert("service_requests", {
+            "user_id": req.user_id,
+            "device_brand": extracted.get("device_brand", "unknown"),
+            "device_model": extracted.get("device_model"),
+            "issue_type": extracted.get("issue_type", "other"),
+            "warranty_status": extracted.get("warranty_status", "unknown"),
+            "description": extracted.get("summary", req.message),
+            "status": "submitted",
+        })
 
-        if not result.data:
+        if not result:
             raise HTTPException(status_code=400, detail="Database insert failed (check RLS policies)")
 
-        request_id = result.data[0]["id"]
+        request_id = result[0]["id"]
 
-        get_supabase().table("request_status_history").insert({
+        db_insert("request_status_history", {
             "request_id": request_id,
             "status": "submitted",
             "note": "Request received and understood from customer's own description",
-        }).execute()
+        })
 
-        return result.data[0]
+        return result[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase DB Error: {str(e)}")
 
@@ -195,27 +209,37 @@ def upload_attachment(request_id: str, file_type: str = Form(...), file: UploadF
         file_extension = file.filename.split(".")[-1] if file.filename and "." in file.filename else "bin"
         storage_path = f"{request_id}/{uuid_lib.uuid4()}.{file_extension}"
 
-        get_supabase().storage.from_(BUCKET_NAME).upload(
-            storage_path,
-            file_bytes,
-            {"content-type": file.content_type}
+        upload_res = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/{BUCKET_NAME}/{storage_path}",
+            headers={"apikey": SUPABASE_SECRET_KEY, "Authorization": f"Bearer {SUPABASE_SECRET_KEY}", "Content-Type": file.content_type or "application/octet-stream"},
+            data=file_bytes,
+            timeout=30,
         )
+        if upload_res.status_code not in (200, 201):
+            raise Exception(f"Upload failed: {upload_res.text}")
 
-        signed_res = get_supabase().storage.from_(BUCKET_NAME).create_signed_url(storage_path, 60 * 60 * 24 * 7)
-
-        result = get_supabase().table("request_attachments").insert({
+        result = db_insert("request_attachments", {
             "request_id": request_id,
             "file_url": storage_path,
             "file_type": file_type,
-        }).execute()
+        })
 
-        if not result.data:
+        if not result:
             raise HTTPException(status_code=400, detail="Could not save attachment record")
 
-        return {
-            "attachment": result.data[0],
-            "temporary_view_url": extract_signed_url(signed_res)
-        }
+        signed_res = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/sign/{BUCKET_NAME}/{storage_path}",
+            headers=REST_HEADERS,
+            json={"expiresIn": 604800},
+            timeout=15,
+        )
+        signed_url = None
+        if signed_res.status_code == 200:
+            signed_url = f"{SUPABASE_URL}/storage/v1{signed_res.json().get('signedURL', '')}"
+
+        return {"attachment": result[0], "temporary_view_url": signed_url}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Storage Error: {str(e)}")
 
@@ -223,17 +247,7 @@ def upload_attachment(request_id: str, file_type: str = Form(...), file: UploadF
 @app.get("/service-requests/{request_id}/attachments")
 def list_attachments(request_id: str):
     try:
-        result = get_supabase().table("request_attachments").select("*").eq("request_id", request_id).execute()
-
-        attachments = []
-        for row in result.data:
-            signed_res = get_supabase().storage.from_(BUCKET_NAME).create_signed_url(row["file_url"], 60 * 60)
-            attachments.append({
-                **row,
-                "temporary_view_url": extract_signed_url(signed_res)
-            })
-
-        return attachments
+        return db_select("request_attachments", filters=f"request_id=eq.{request_id}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
@@ -241,29 +255,27 @@ def list_attachments(request_id: str):
 @app.post("/courier-bookings")
 def create_courier_booking(req: CourierBookingCreate):
     try:
-        result = (
-            get_supabase().table("courier_bookings")
-            .insert({
-                "request_id": req.request_id,
-                "pickup_address": req.pickup_address,
-                "courier_provider": req.courier_provider or "TBD",
-                "status": "pending",
-            })
-            .execute()
-        )
+        result = db_insert("courier_bookings", {
+            "request_id": req.request_id,
+            "pickup_address": req.pickup_address,
+            "courier_provider": req.courier_provider or "TBD",
+            "status": "pending",
+        })
 
-        if not result.data:
+        if not result:
             raise HTTPException(status_code=400, detail="Could not create courier booking")
 
-        get_supabase().table("service_requests").update({"status": "courier_booked"}).eq("id", req.request_id).execute()
+        db_update("service_requests", f"id=eq.{req.request_id}", {"status": "courier_booked"})
 
-        get_supabase().table("request_status_history").insert({
+        db_insert("request_status_history", {
             "request_id": req.request_id,
             "status": "courier_booked",
             "note": f"Courier pickup scheduled from {req.pickup_address}",
-        }).execute()
+        })
 
-        return result.data[0]
+        return result[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
@@ -271,23 +283,20 @@ def create_courier_booking(req: CourierBookingCreate):
 @app.patch("/service-requests/{request_id}/status")
 def update_status(request_id: str, update: StatusUpdate):
     try:
-        result = (
-            get_supabase().table("service_requests")
-            .update({"status": update.status})
-            .eq("id", request_id)
-            .execute()
-        )
+        result = db_update("service_requests", f"id=eq.{request_id}", {"status": update.status})
 
-        if not result.data:
+        if not result:
             raise HTTPException(status_code=404, detail="Request not found")
 
-        get_supabase().table("request_status_history").insert({
+        db_insert("request_status_history", {
             "request_id": request_id,
             "status": update.status,
             "note": update.note,
-        }).execute()
+        })
 
-        return result.data[0]
+        return result[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
@@ -295,13 +304,6 @@ def update_status(request_id: str, update: StatusUpdate):
 @app.get("/service-requests/{request_id}/timeline")
 def get_timeline(request_id: str):
     try:
-        result = (
-            get_supabase().table("request_status_history")
-            .select("*")
-            .eq("request_id", request_id)
-            .order("created_at")
-            .execute()
-        )
-        return result.data
+        return db_select("request_status_history", filters=f"request_id=eq.{request_id}", order="created_at")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
