@@ -23,7 +23,7 @@ def get_supabase():
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 BUCKET_NAME = "attachments"
 
 app = FastAPI(title="M&P Service Assistant")
