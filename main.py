@@ -17,10 +17,13 @@ SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Clients
-supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+def get_supabase():
+    return create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+
+
 genai.configure(api_key=GEMINI_API_KEY)
 
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 BUCKET_NAME = "attachments"
 
 app = FastAPI(title="M&P Service Assistant")
@@ -85,7 +88,7 @@ def health():
 def create_service_request(req: ServiceRequestCreate):
     try:
         result = (
-            supabase.table("service_requests")
+            get_supabase().table("service_requests")
             .insert({
                 "user_id": req.user_id,
                 "device_brand": req.device_brand,
@@ -103,7 +106,7 @@ def create_service_request(req: ServiceRequestCreate):
 
         request_id = result.data[0]["id"]
 
-        supabase.table("request_status_history").insert({
+        get_supabase().table("request_status_history").insert({
             "request_id": request_id,
             "status": "submitted",
             "note": "Request received from customer",
@@ -117,7 +120,7 @@ def create_service_request(req: ServiceRequestCreate):
 @app.get("/service-requests/{request_id}")
 def get_service_request(request_id: str):
     try:
-        result = supabase.table("service_requests").select("*").eq("id", request_id).execute()
+        result = get_supabase().table("service_requests").select("*").eq("id", request_id).execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Request not found")
         return result.data[0]
@@ -128,7 +131,7 @@ def get_service_request(request_id: str):
 @app.get("/service-centers")
 def list_service_centers():
     try:
-        result = supabase.table("service_centers").select("*").eq("is_active", True).execute()
+        result = get_supabase().table("service_centers").select("*").eq("is_active", True).execute()
         return result.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
@@ -156,7 +159,7 @@ def describe_problem(req: DescribeProblemRequest):
     # Step 2: Insert into Supabase
     try:
         result = (
-            supabase.table("service_requests")
+            get_supabase().table("service_requests")
             .insert({
                 "user_id": req.user_id,
                 "device_brand": extracted.get("device_brand", "unknown"),
@@ -174,7 +177,7 @@ def describe_problem(req: DescribeProblemRequest):
 
         request_id = result.data[0]["id"]
 
-        supabase.table("request_status_history").insert({
+        get_supabase().table("request_status_history").insert({
             "request_id": request_id,
             "status": "submitted",
             "note": "Request received and understood from customer's own description",
@@ -192,15 +195,15 @@ def upload_attachment(request_id: str, file_type: str = Form(...), file: UploadF
         file_extension = file.filename.split(".")[-1] if file.filename and "." in file.filename else "bin"
         storage_path = f"{request_id}/{uuid_lib.uuid4()}.{file_extension}"
 
-        supabase.storage.from_(BUCKET_NAME).upload(
+        get_supabase().storage.from_(BUCKET_NAME).upload(
             storage_path,
             file_bytes,
             {"content-type": file.content_type}
         )
 
-        signed_res = supabase.storage.from_(BUCKET_NAME).create_signed_url(storage_path, 60 * 60 * 24 * 7)
+        signed_res = get_supabase().storage.from_(BUCKET_NAME).create_signed_url(storage_path, 60 * 60 * 24 * 7)
 
-        result = supabase.table("request_attachments").insert({
+        result = get_supabase().table("request_attachments").insert({
             "request_id": request_id,
             "file_url": storage_path,
             "file_type": file_type,
@@ -220,11 +223,11 @@ def upload_attachment(request_id: str, file_type: str = Form(...), file: UploadF
 @app.get("/service-requests/{request_id}/attachments")
 def list_attachments(request_id: str):
     try:
-        result = supabase.table("request_attachments").select("*").eq("request_id", request_id).execute()
+        result = get_supabase().table("request_attachments").select("*").eq("request_id", request_id).execute()
 
         attachments = []
         for row in result.data:
-            signed_res = supabase.storage.from_(BUCKET_NAME).create_signed_url(row["file_url"], 60 * 60)
+            signed_res = get_supabase().storage.from_(BUCKET_NAME).create_signed_url(row["file_url"], 60 * 60)
             attachments.append({
                 **row,
                 "temporary_view_url": extract_signed_url(signed_res)
@@ -239,7 +242,7 @@ def list_attachments(request_id: str):
 def create_courier_booking(req: CourierBookingCreate):
     try:
         result = (
-            supabase.table("courier_bookings")
+            get_supabase().table("courier_bookings")
             .insert({
                 "request_id": req.request_id,
                 "pickup_address": req.pickup_address,
@@ -252,9 +255,9 @@ def create_courier_booking(req: CourierBookingCreate):
         if not result.data:
             raise HTTPException(status_code=400, detail="Could not create courier booking")
 
-        supabase.table("service_requests").update({"status": "courier_booked"}).eq("id", req.request_id).execute()
+        get_supabase().table("service_requests").update({"status": "courier_booked"}).eq("id", req.request_id).execute()
 
-        supabase.table("request_status_history").insert({
+        get_supabase().table("request_status_history").insert({
             "request_id": req.request_id,
             "status": "courier_booked",
             "note": f"Courier pickup scheduled from {req.pickup_address}",
@@ -269,7 +272,7 @@ def create_courier_booking(req: CourierBookingCreate):
 def update_status(request_id: str, update: StatusUpdate):
     try:
         result = (
-            supabase.table("service_requests")
+            get_supabase().table("service_requests")
             .update({"status": update.status})
             .eq("id", request_id)
             .execute()
@@ -278,7 +281,7 @@ def update_status(request_id: str, update: StatusUpdate):
         if not result.data:
             raise HTTPException(status_code=404, detail="Request not found")
 
-        supabase.table("request_status_history").insert({
+        get_supabase().table("request_status_history").insert({
             "request_id": request_id,
             "status": update.status,
             "note": update.note,
@@ -293,7 +296,7 @@ def update_status(request_id: str, update: StatusUpdate):
 def get_timeline(request_id: str):
     try:
         result = (
-            supabase.table("request_status_history")
+            get_supabase().table("request_status_history")
             .select("*")
             .eq("request_id", request_id)
             .order("created_at")
