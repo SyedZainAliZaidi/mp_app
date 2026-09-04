@@ -5,7 +5,7 @@ import uuid as uuid_lib
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from groq import Groq
+import google.generativeai as genai
 from pydantic import BaseModel
 from supabase import create_client
 
@@ -14,13 +14,13 @@ load_dotenv()
 # Environment Variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Clients
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
-groq_client = Groq(api_key=GROQ_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 
-GROQ_MODEL = "openai/gpt-oss-120b"
+GEMINI_MODEL = "gemini-2.0-flash"
 BUCKET_NAME = "attachments"
 
 app = FastAPI(title="M&P Service Assistant")
@@ -60,14 +60,13 @@ class StatusUpdate(BaseModel):
 
 
 # Helpers
-def ask_groq_json(prompt: str) -> str:
-    response = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        timeout=10,
+def ask_gemini_json(prompt: str) -> str:
+    model = genai.GenerativeModel(
+        GEMINI_MODEL,
+        generation_config={"response_mime_type": "application/json"},
     )
-    return response.choices[0].message.content
+    response = model.generate_content(prompt)
+    return response.text
 
 
 def extract_signed_url(signed_res: dict | object) -> str | None:
@@ -137,7 +136,7 @@ def list_service_centers():
 
 @app.post("/describe-problem")
 def describe_problem(req: DescribeProblemRequest):
-    # Step 1: Call Groq API
+    # Step 1: Call Gemini API
     try:
         prompt = (
             f"A customer contacted M&P device service support and described their problem in their own words.\n\n"
@@ -149,10 +148,10 @@ def describe_problem(req: DescribeProblemRequest):
             f'"warranty_status": "one of warranty, non_warranty, unknown", '
             f'"summary": "a short one sentence clean summary of the issue"}}'
         )
-        raw = ask_groq_json(prompt)
+        raw = ask_gemini_json(prompt)
         extracted = json.loads(raw)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Groq API Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Gemini API Error: {str(e)}")
 
     # Step 2: Insert into Supabase
     try:
