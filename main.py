@@ -20,7 +20,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 BUCKET_NAME = "attachments"
 
 app = FastAPI(title="M&P Service Assistant")
