@@ -307,3 +307,12 @@ def get_timeline(request_id: str):
         return db_select("request_status_history", filters=f"request_id=eq.{request_id}", order="created_at")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
+@app.get("/debug-env")
+def debug_env():
+    url_value = SUPABASE_URL or "NOT SET"
+    return {
+        "supabase_url_value": url_value,
+        "supabase_url_length": len(url_value),
+        "ends_with_supabase_co": url_value.endswith(".supabase.co"),
+    }
